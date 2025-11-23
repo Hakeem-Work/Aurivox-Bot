@@ -1,30 +1,26 @@
-require('dotenv').config();
-const express = require('express');
+// app.js
 const TelegramBot = require('node-telegram-bot-api');
-const axios = require('axios');
 const fs = require('fs');
-const ffmpeg = require('fluent-ffmpeg');
-const ffmpegPath = require('ffmpeg-static');
-ffmpeg.setFfmpegPath(ffmpegPath);
+const fetch = require('node-fetch');
+const path = require('path');
+const FormData = require('form-data');
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+// Load environment variables
+const token = process.env.TELEGRAM_BOT_TOKEN;
+const hfToken = process.env.HUGGINGFACE_API_TOKEN;
 
-// Telegram bot setup
-const bot = new TelegramBot(process.env.TELEGRAM_BOT_TOKEN, { polling: true });
+// Initialize bot in polling mode
+const bot = new TelegramBot(token, { polling: true });
 
-// Health endpoint for Railway
-app.get('/', (req, res) => {
-  res.send('Aurivox bot is running!');
-});
+// Ensure tmp directory exists
+const tmpDir = path.join(__dirname, 'tmp');
+if (!fs.existsSync(tmpDir)) {
+  fs.mkdirSync(tmpDir);
+}
 
-app.listen(PORT, () => {
-  console.log(`Aurivox health endpoint listening on :${PORT}`);
-});
-
-// Handle /start
+// Handle /start command
 bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(msg.chat.id, '👋 Welcome to Aurivox! Send me a voice note and I’ll reply with AI speech.');
+  bot.sendMessage(msg.chat.id, "👋 Welcome to Aurivox! Send me a voice note and I’ll reply with AI speech.");
 });
 
 // Handle voice messages
@@ -34,67 +30,59 @@ bot.on('voice', async (msg) => {
 
   try {
     // Get file link from Telegram
-    const file = await bot.getFile(fileId);
-    const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const fileLink = await bot.getFileLink(fileId);
 
-    // Download OGG file
-    const oggPath = `tmp/${fileId}.ogg`;
-    const mp3Path = `tmp/${fileId}.mp3`;
-    const writer = fs.createWriteStream(oggPath);
-    const response = await axios({ url: fileUrl, method: 'GET', responseType: 'stream' });
-    response.data.pipe(writer);
+    // Download the voice file
+    const response = await fetch(fileLink);
+    const buffer = await response.buffer();
 
-    await new Promise((resolve, reject) => {
-      writer.on('finish', resolve);
-      writer.on('error', reject);
-    });
+    // Save the file locally
+    const filePath = path.join(tmpDir, `${fileId}.ogg`);
+    fs.writeFileSync(filePath, buffer);
 
-    // Convert OGG to MP3
-    await new Promise((resolve, reject) => {
-      ffmpeg(oggPath).toFormat('mp3').save(mp3Path).on('end', resolve).on('error', reject);
-    });
+    // Send to Hugging Face Whisper for transcription
+    const formData = new FormData();
+    formData.append("file", fs.createReadStream(filePath));
 
-    // Send MP3 to Hugging Face ASR
-    const audioData = fs.readFileSync(mp3Path);
-    const asrResponse = await axios.post(
-      'https://api-inference.huggingface.co/models/openai/whisper-small',
-      audioData,
+    const transcribeRes = await fetch(
+      "https://api-inference.huggingface.co/models/openai/whisper-small",
       {
-        headers: {
-          Authorization: `Bearer ${process.env.HUGGINGFACE_API_TOKEN}`,
-          'Content-Type': 'audio/mpeg',
-        },
+        method: "POST",
+        headers: { Authorization: `Bearer ${hfToken}` },
+        body: formData,
       }
     );
 
-    const text = asrResponse.data.text || 'Sorry, I could not transcribe that.';
+    const transcribeData = await transcribeRes.json();
+    const text = transcribeData.text || "⚠️ Could not transcribe audio.";
 
-    // Generate AI speech reply
-    const ttsResponse = await axios.post(
-      'https://api-inference.huggingface.co/models/facebook/mms-tts-eng',
-      { inputs: text },
+    // Send transcription back
+    await bot.sendMessage(chatId, `📝 Transcription: ${text}`);
+
+    // Send to Hugging Face TTS for speech reply
+    const ttsRes = await fetch(
+      "https://api-inference.huggingface.co/models/facebook/mms-tts-eng",
       {
+        method: "POST",
         headers: {
-          Authorization: `Bearer ${process.env.HUGGINGFACE_API_TOKEN}`,
-          'Content-Type': 'application/json',
+          Authorization: `Bearer ${hfToken}`,
+          "Content-Type": "application/json",
         },
-        responseType: 'arraybuffer',
+        body: JSON.stringify({ inputs: text }),
       }
     );
 
-    const replyPath = `tmp/reply_${fileId}.mp3`;
-    fs.writeFileSync(replyPath, Buffer.from(ttsResponse.data));
+    const ttsBuffer = await ttsRes.buffer();
+    const ttsPath = path.join(tmpDir, `${fileId}.wav`);
+    fs.writeFileSync(ttsPath, ttsBuffer);
 
-    // Send back audio reply
-    await bot.sendAudio(chatId, replyPath, {}, { filename: 'reply.mp3', contentType: 'audio/mpeg' });
+    // Reply with audio
+    await bot.sendAudio(chatId, ttsPath);
 
-    // Cleanup
-    fs.unlinkSync(oggPath);
-    fs.unlinkSync(mp3Path);
-    fs.unlinkSync(replyPath);
-
-  } catch (err) {
-    console.error(err);
-    bot.sendMessage(chatId, '⚠️ Something went wrong processing your voice note.');
+  } catch (error) {
+    console.error("Voice handling error:", error);
+    bot.sendMessage(chatId, "⚠️ Sorry, I couldn’t process your voice note.");
   }
 });
+
+console.log("Aurivox bot is running in polling mode...");
