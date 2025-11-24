@@ -92,28 +92,6 @@ bot.on('voice', async (msg) => {
           Authorization: `Bearer ${hfToken}`,
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ inputs: text })
+        body: ({ inputs: text })
       }
     );
-
-    if (!ttsRes.ok) {
-      const errText = await ttsRes.text();
-      throw new Error(`TTS failed: ${ttsRes.status} ${errText}`);
-    }
-
-    const ttsBuffer = await ttsRes.buffer();
-    const ttsPath = path.join(tmpDir, `${fileId}.wav`);
-    fs.writeFileSync(ttsPath, ttsBuffer);
-    log("Saved TTS to", ttsPath);
-
-    // 6) Send audio reply
-    await bot.sendAudio(chatId, ttsPath, {}, { filename: "reply.wav", contentType: "audio/wav" });
-    log("Audio reply sent.");
-
-  } catch (error) {
-    console.error("Voice handling error:", error);
-    await bot.sendMessage(chatId, "⚠️ Sorry, I couldn’t process your voice note.");
-  }
-});
-
-log("Aurivox bot is running in polling mode...");
