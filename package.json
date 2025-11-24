@@ -3,15 +3,13 @@
   "version": "1.0.0",
   "description": "Telegram bot that transcribes voice notes and replies with AI speech using Hugging Face.",
   "main": "app.js",
+  "type": "commonjs",
   "scripts": {
     "start": "node app.js"
   },
   "dependencies": {
-    "node-fetch": "^2.6.7",
     "form-data": "^4.0.0",
+    "node-fetch": "^2.6.7",
     "node-telegram-bot-api": "^0.61.0"
-  },
-  "engines": {
-    "node": ">=16.0.0"
   }
 }
