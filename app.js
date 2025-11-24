@@ -1,15 +1,22 @@
 // app.js
 const TelegramBot = require('node-telegram-bot-api');
 const fs = require('fs');
-const fetch = require('node-fetch');
+const fetch = require('node-fetch'); // v2 API (CommonJS)
 const path = require('path');
 const FormData = require('form-data');
 
-// Load environment variables
+// Environment variables
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const hfToken = process.env.HUGGINGFACE_API_TOKEN;
 
-// Initialize bot in polling mode
+if (!token) {
+  throw new Error("Missing TELEGRAM_BOT_TOKEN");
+}
+if (!hfToken) {
+  console.warn("HUGGINGFACE_API_TOKEN is missing. Transcription/TTS will fail.");
+}
+
+// Initialize bot (polling)
 const bot = new TelegramBot(token, { polling: true });
 
 // Ensure tmp directory exists
@@ -18,71 +25,95 @@ if (!fs.existsSync(tmpDir)) {
   fs.mkdirSync(tmpDir);
 }
 
-// Handle /start command
-bot.onText(/\/start/, (msg) => {
+// Logging helper
+const log = (...args) => console.log(new Date().toISOString(), ...args);
+
+// /start command
+bot.onText(/\/start/i, (msg) => {
+  log("Received /start from", msg.chat.id);
   bot.sendMessage(msg.chat.id, "👋 Welcome to Aurivox! Send me a voice note and I’ll reply with AI speech.");
 });
 
-// Handle voice messages
+// Voice handler
 bot.on('voice', async (msg) => {
   const chatId = msg.chat.id;
   const fileId = msg.voice.file_id;
 
-  try {
-    // Get file link from Telegram
-    const fileLink = await bot.getFileLink(fileId);
+  log("Received voice message from", chatId, "file_id:", fileId);
 
-    // Download the voice file
+  try {
+    // 1) Get downloadable link
+    const fileLink = await bot.getFileLink(fileId);
+    log("File link:", fileLink);
+
+    // 2) Download OGG
     const response = await fetch(fileLink);
+    if (!response.ok) throw new Error(`Download failed: ${response.status} ${response.statusText}`);
     const buffer = await response.buffer();
 
-    // Save the file locally
-    const filePath = path.join(tmpDir, `${fileId}.ogg`);
-    fs.writeFileSync(filePath, buffer);
+    // 3) Save to tmp
+    const oggPath = path.join(tmpDir, `${fileId}.ogg`);
+    fs.writeFileSync(oggPath, buffer);
+    log("Saved voice to", oggPath);
 
-    // Send to Hugging Face Whisper for transcription
+    // 4) Transcribe with HF Whisper
+    if (!hfToken) {
+      await bot.sendMessage(chatId, "⚠️ Hugging Face token not set. Cannot transcribe.");
+      return;
+    }
+
     const formData = new FormData();
-    formData.append("file", fs.createReadStream(filePath));
+    formData.append("file", fs.createReadStream(oggPath));
 
+    log("Transcribing audio with Hugging Face Whisper...");
     const transcribeRes = await fetch(
       "https://api-inference.huggingface.co/models/openai/whisper-small",
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${hfToken}` },
-        body: formData,
-      }
+      { method: "POST", headers: { Authorization: `Bearer ${hfToken}` }, body: formData }
     );
 
-    const transcribeData = await transcribeRes.json();
-    const text = transcribeData.text || "⚠️ Could not transcribe audio.";
+    if (!transcribeRes.ok) {
+      const errText = await transcribeRes.text();
+      throw new Error(`Transcription failed: ${transcribeRes.status} ${errText}`);
+    }
 
-    // Send transcription back
+    const transcribeData = await transcribeRes.json();
+    const text = transcribeData.text || (transcribeData[0]?.text) || "⚠️ Could not transcribe audio.";
+    log("Transcription:", text);
+
     await bot.sendMessage(chatId, `📝 Transcription: ${text}`);
 
-    // Send to Hugging Face TTS for speech reply
+    // 5) TTS reply (generate audio from text)
+    log("Generating TTS with Hugging Face...");
     const ttsRes = await fetch(
       "https://api-inference.huggingface.co/models/facebook/mms-tts-eng",
       {
         method: "POST",
         headers: {
           Authorization: `Bearer ${hfToken}`,
-          "Content-Type": "application/json",
+          "Content-Type": "application/json"
         },
-        body: JSON.stringify({ inputs: text }),
+        body: JSON.stringify({ inputs: text })
       }
     );
+
+    if (!ttsRes.ok) {
+      const errText = await ttsRes.text();
+      throw new Error(`TTS failed: ${ttsRes.status} ${errText}`);
+    }
 
     const ttsBuffer = await ttsRes.buffer();
     const ttsPath = path.join(tmpDir, `${fileId}.wav`);
     fs.writeFileSync(ttsPath, ttsBuffer);
+    log("Saved TTS to", ttsPath);
 
-    // Reply with audio
-    await bot.sendAudio(chatId, ttsPath);
+    // 6) Send audio reply
+    await bot.sendAudio(chatId, ttsPath, {}, { filename: "reply.wav", contentType: "audio/wav" });
+    log("Audio reply sent.");
 
   } catch (error) {
     console.error("Voice handling error:", error);
-    bot.sendMessage(chatId, "⚠️ Sorry, I couldn’t process your voice note.");
+    await bot.sendMessage(chatId, "⚠️ Sorry, I couldn’t process your voice note.");
   }
 });
 
-console.log("Aurivox bot is running in polling mode...");
+log("Aurivox bot is running in polling mode...");
